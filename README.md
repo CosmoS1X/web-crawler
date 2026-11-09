@@ -180,7 +180,10 @@ produces archives for Linux, macOS and Windows (`amd64` and `arm64`), a
 
 The version is injected at build time with
 `-ldflags "-X main.version=<version>"`. `make build` takes the version from
-`git describe`, while a plain `go build` reports `dev`.
+`git describe`, while a plain `go build` uses the module version stamped by the
+Go toolchain (or `dev` when no version is available). Binaries installed with
+`go install github.com/CosmoS1X/web-crawler/cmd/web-crawler@vX.Y.Z` report the
+same module version `vX.Y.Z`.
 
 Create and push a tag with the Makefile:
 
