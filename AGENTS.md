@@ -61,6 +61,9 @@
 ├── internal/app/
 │   ├── app.go               # urfave/cli: аргументы/флаги -> crawler.Options
 │   └── app_test.go
+├── internal/versioninfo/
+│   ├── versioninfo.go       # версия из ldflags или build info (go install)
+│   └── versioninfo_test.go
 ├── crawler/
 │   ├── analyze.go           # Analyze(ctx, Options) ([]byte, error)
 │   ├── options.go           # Options, sentinel-ошибки, валидация
@@ -200,7 +203,7 @@ Sentinel-ошибки: `ErrInvalidURL`, `ErrNilHTTPClient`, `ErrInvalidOptions`.
 | `--user-agent` | string | "" | custom user agent |
 | `--version` | flag | | print the version and exit |
 
-`--version` печатает `web-crawler version <version>`. Версия задаётся при сборке через `-ldflags "-X main.version=..."`; в локальной сборке без тега — `dev`, в `make build` — значение `git describe`.
+`--version` печатает `web-crawler version <version>`. Версия задаётся при сборке через `-ldflags "-X main.version=..."`; в `make build` — значение `git describe`. Без ldflags используется версия модуля из build info (например, `v1.0.0` или `v1.0.0+dirty`), а если она недоступна — `dev`. Для бинарников, установленных через `go install module@vX.Y.Z`, build info содержит `vX.Y.Z`, поэтому версия совпадает с тегом.
 
 `RPS` имеет приоритет над `Delay`. Глобальное ограничение частоты применяется ко всем HTTP-запросам: страницы, проверки ссылок и ассетов. `User-Agent` добавляется к запросам, если указан. При отмене контекста ожидание rate-лимитера прерывается без зависания.
 
@@ -212,7 +215,7 @@ CLI печатает отчёт без изменений: ровно JSON и о
 
 - Релиз собирается GoReleaser (`.goreleaser.yaml`) в workflow `.github/workflows/release.yml` по пушу тега `v*`.
 - Артефакты: `linux`, `darwin`, `windows` × `amd64`, `arm64`; архивы `tar.gz` (`zip` для Windows), `checksums.txt`, GitHub Release.
-- Версия передаётся в бинарник через `-ldflags "-X main.version={{.Version}}"`.
+- Версия передаётся в бинарник через `-ldflags "-X main.version=v{{.Version}}"`.
 - Теги создаются через `make tag VERSION=1.2.3` (проверяет semver, чистоту дерева и отсутствие тега), отправляются через `make tag-push VERSION=1.2.3` или одной командой `make release VERSION=1.2.3`.
 - Локальная проверка конфигурации: `goreleaser check` и `make snapshot`.
 - CI дополнительно выполняет `goreleaser check`, чтобы конфиг не ломался до релиза.
