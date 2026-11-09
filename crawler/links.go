@@ -11,11 +11,6 @@ import (
 	"golang.org/x/net/html"
 )
 
-const (
-	schemeHTTP  = "http"
-	schemeHTTPS = "https"
-)
-
 type linkKind int
 
 const (
@@ -25,48 +20,66 @@ const (
 	linkStyle
 )
 
+const (
+	attrHref = "href"
+	attrSrc  = "src"
+	attrRel  = "rel"
+)
+
+type linkSpec struct {
+	attr string
+	kind linkKind
+	rel  string
+}
+
+var linkSpecs = map[string]linkSpec{
+	"a":      {attr: attrHref, kind: linkNavigation},
+	"img":    {attr: attrSrc, kind: linkImage},
+	"script": {attr: attrSrc, kind: linkScript},
+	"link":   {attr: attrHref, kind: linkStyle, rel: "stylesheet"},
+}
+
 type extractedLink struct {
 	URL  string
 	Kind linkKind
 }
 
-func (c *crawler) findBrokenLinks(ctx context.Context, pageURL string, depth int, body []byte) []BrokenLink {
-	base, err := url.Parse(pageURL)
-	if err != nil {
-		return []BrokenLink{}
-	}
-
-	root, err := url.Parse(c.opts.URL)
-	if err != nil {
-		return []BrokenLink{}
-	}
-
-	rawLinks := extractLinks(body)
+func (c *crawler) findBrokenLinks(
+	ctx context.Context,
+	pageURL, base *url.URL,
+	depth int,
+	rawLinks []extractedLink,
+) []BrokenLink {
 	broken := make([]BrokenLink, 0, len(rawLinks))
+	seen := make(map[string]struct{}, len(rawLinks))
 	canSchedule := depth+1 < c.opts.Depth
+	pageKey := canonicalURL(pageURL)
 	for _, link := range rawLinks {
-		if link.Kind != linkNavigation {
-			continue
+		if ctx.Err() != nil {
+			return broken
 		}
 
-		linkURL, ok := resolveLink(base, link.URL)
+		linkURL, ok := resolveNavigationLink(base, link)
 		if !ok {
 			continue
 		}
-		linkParsed, err := url.Parse(linkURL)
-		if err != nil {
+		if canonicalURL(linkURL) == pageKey {
 			continue
 		}
-		if canonicalURL(linkParsed) == canonicalURL(base) {
+		linkKey := linkURL.String()
+		if _, exists := seen[linkKey]; exists {
+			continue
+		}
+		seen[linkKey] = struct{}{}
+
+		if c.isInternal(linkURL) && canSchedule {
 			continue
 		}
 
-		internal := linkParsed.Host == root.Host
-		if internal && canSchedule {
-			continue
+		item, isBroken := c.probeLink(ctx, linkURL)
+		if ctx.Err() != nil {
+			return broken
 		}
-
-		item, isBroken := c.checkLink(ctx, linkURL)
 		if isBroken {
 			broken = append(broken, item)
 		}
@@ -74,46 +87,48 @@ func (c *crawler) findBrokenLinks(ctx context.Context, pageURL string, depth int
 	return broken
 }
 
-func (c *crawler) checkLink(ctx context.Context, linkURL string) (BrokenLink, bool) {
-	result := c.fetch(ctx, http.MethodHead, linkURL, fetchStatusOnly)
-	if result.Err != nil {
-		return BrokenLink{URL: linkURL, Error: result.Err.Error()}, true
-	}
-
-	if result.StatusCode == http.StatusMethodNotAllowed {
-		result = c.fetch(ctx, http.MethodGet, linkURL, fetchStatusOnly)
-		if result.Err != nil {
-			return BrokenLink{URL: linkURL, Error: result.Err.Error()}, true
-		}
-	}
-
-	if result.StatusCode >= http.StatusBadRequest {
-		return BrokenLink{
-			URL:        linkURL,
-			StatusCode: result.StatusCode,
-			Error:      statusErrorText(result.StatusCode),
-		}, true
+func (c *crawler) probeLink(ctx context.Context, linkURL *url.URL) (BrokenLink, bool) {
+	rawURL := linkURL.String()
+	result := c.fetchWithGETFallback(ctx, rawURL, fetchStatusOnly, func(result fetchResult) bool {
+		return result.StatusCode == http.StatusMethodNotAllowed
+	})
+	if statusCode, errText, failed := fetchFailure(result); failed {
+		return BrokenLink{URL: rawURL, StatusCode: statusCode, Error: errText}, true
 	}
 	return BrokenLink{}, false
 }
 
-func extractLinks(body []byte) []extractedLink {
+// resolveNavigationLink resolves a raw link and rejects non-navigation kinds.
+func resolveNavigationLink(base *url.URL, link extractedLink) (*url.URL, bool) {
+	if link.Kind != linkNavigation {
+		return nil, false
+	}
+	return resolveLink(base, link.URL)
+}
+
+func extractLinks(body []byte) (links []extractedLink, baseHrefs []string) {
 	tokenizer := html.NewTokenizer(bytes.NewReader(body))
-	links := make([]extractedLink, 0)
+	links = make([]extractedLink, 0)
 
 	for {
 		tokenType := tokenizer.Next()
 		if tokenType == html.ErrorToken {
-			return links
+			return links, baseHrefs
 		}
 		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
 			continue
 		}
 
 		tagName, _ := tokenizer.TagName()
-		tag := string(tagName)
-		attrName := linkAttribute(tag)
-		if attrName == "" {
+		if string(tagName) == "base" {
+			if href, ok := tagAttr(tokenizer, attrHref); ok && href != "" {
+				baseHrefs = append(baseHrefs, href)
+			}
+			continue
+		}
+
+		spec, ok := linkSpecs[string(tagName)]
+		if !ok {
 			continue
 		}
 
@@ -121,9 +136,9 @@ func extractLinks(body []byte) []extractedLink {
 		for {
 			key, value, more := tokenizer.TagAttr()
 			switch string(key) {
-			case attrName:
+			case spec.attr:
 				rawURL = string(value)
-			case "rel":
+			case attrRel:
 				rel = string(value)
 			}
 			if !more {
@@ -131,89 +146,33 @@ func extractLinks(body []byte) []extractedLink {
 			}
 		}
 
+		if spec.rel != "" && !hasRelToken(rel, spec.rel) {
+			continue
+		}
 		if rawURL == "" {
 			continue
 		}
-		kind, ok := linkKindFor(tag, rel)
-		if !ok {
-			continue
-		}
-		links = append(links, extractedLink{URL: rawURL, Kind: kind})
+		links = append(links, extractedLink{URL: rawURL, Kind: spec.kind})
 	}
 }
 
-func linkAttribute(tagName string) string {
-	switch tagName {
-	case "a", "link":
-		return "href"
-	case "script", "img":
-		return "src"
-	default:
-		return ""
-	}
-}
-
-func linkKindFor(tagName, rel string) (linkKind, bool) {
-	switch tagName {
-	case "a":
-		return linkNavigation, true
-	case "img":
-		return linkImage, true
-	case "script":
-		return linkScript, true
-	case "link":
-		if hasRelToken(rel, "stylesheet") {
-			return linkStyle, true
+// tagAttr consumes the tag attributes and returns the named one when present.
+func tagAttr(tokenizer *html.Tokenizer, name string) (string, bool) {
+	var value string
+	var found bool
+	for {
+		key, attrValue, more := tokenizer.TagAttr()
+		if string(key) == name {
+			value = string(attrValue)
+			found = true
 		}
-		return 0, false
-	default:
-		return 0, false
+		if !more {
+			break
+		}
 	}
+	return value, found
 }
 
 func hasRelToken(rel, token string) bool {
 	return slices.Contains(strings.Fields(strings.ToLower(rel)), token)
-}
-
-func resolveLink(base *url.URL, raw string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || strings.HasPrefix(raw, "#") {
-		return "", false
-	}
-
-	ref, err := url.Parse(raw)
-	if err != nil {
-		return "", false
-	}
-
-	absolute := base.ResolveReference(ref)
-	absolute.Fragment = ""
-	absolute.RawFragment = ""
-	if absolute.Scheme != schemeHTTP && absolute.Scheme != schemeHTTPS {
-		return "", false
-	}
-	if absolute.Host == "" {
-		return "", false
-	}
-	return absolute.String(), true
-}
-
-func canonicalURL(u *url.URL) string {
-	canonical := *u
-	canonical.Fragment = ""
-	canonical.RawFragment = ""
-	if canonical.Path == "" {
-		canonical.Path = "/"
-	} else if canonical.Path != "/" {
-		canonical.Path = strings.TrimSuffix(canonical.Path, "/")
-	}
-	return canonical.String()
-}
-
-func normalizeURLForKey(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return canonicalURL(u)
 }

@@ -111,8 +111,8 @@ formatters:
         - default
         - localmodule
     gofumpt:
-      # update when the module is renamed
-      module-path: code
+      # must match the module path in go.mod
+      module-path: github.com/CosmoS1X/web-crawler
 
 issues:
   max-issues-per-linter: 0

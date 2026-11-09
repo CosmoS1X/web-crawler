@@ -2,7 +2,7 @@
 
 ## О проекте
 
-Консольный парсер структуры сайта на Go. Модуль временно называется `code` (переименуем к релизу). Бинарник — `hexlet-go-crawler`.
+Консольный парсер структуры сайта на Go. Модуль — `github.com/CosmoS1X/web-crawler`, бинарник — `web-crawler`.
 
 ## Конвенции
 
@@ -17,17 +17,28 @@
   `visited` — локальная карта в `Run`.
 - Тесты — во внешних пакетах `_test` (включён линтер `testpackage`), на `testify`:
   `require` для обязательных проверок, `assert` для остальных.
-- Стремиться к максимальному покрытию, включая негативные сценарии и обработку ошибок.
-  Если покрытие участка нецелесообразно (glue-код `main`, недостижимые защитные ветки,
-  логика сторонних пакетов), явно указывать это с обоснованием в отчёте о задаче.
+- Тесты `crawler` рассматривают пакет как чёрный ящик: только `Analyze`,
+  экспортированные типы/ошибки и переданный `*http.Client`. Запрещены тесты
+  в `package crawler`, файлы `*_internal_test.go` и экспорт символов «только для тестов».
+- Наблюдать за запросами к тестовому клиенту допустимо только для поведения,
+  зафиксированного в `README.md`/`AGENTS.md` (методы, retries, rate limit, кэш,
+  User-Agent, лимит тела). Внутренние константы, порядок вызовов и тексты ошибок
+  не должны быть предметом проверки, если они не являются публичным контрактом.
+- Стремиться к покрытию поведения, включая негативные сценарии и обработку ошибок;
+  100% statement coverage не самоцель. Если покрытие участка нецелесообразно
+  (glue-код `main`, недостижимые защитные ветки, логика сторонних пакетов),
+  явно указывать это с обоснованием в отчёте о задаче.
 - Сетевые ошибки не считаются ошибкой запуска: они попадают в отчёт, код выхода — 0.
   Код 1 — при некорректных аргументах/опциях и ошибках записи отчёта.
 - Линтер: `golangci-lint` (`2.15.0`), конфиг `.golangci.yml`. При ложном срабатывании
-  сначала обсуждаем и правим конфиг, а не замалчиваем код.
-- `gocritic:hugeParam` уже отключён в `.golangci.yml`, так как `Options`
+  сначала обсуждаем и правим конфиг, а не замалчиваем код. При переименовании модуля
+  обновлять `gofumpt.module-path` в `.golangci.yml`.
+- `gocritic:hugeParam` отключён в `.golangci.yml`, так как `Options`
   передаётся по значению.
-- Makefile: `build`, `test`, `cover` (профиль + сводка), `cover-show` (открыть отчёт
-  в браузере), `run`, `fmt`, `lint` (зависит от `fmt`), `tidy`, `clean`.
+- Makefile: `build` (с версией из `git describe`), `test`, `test-race`, `cover`
+  (профиль + сводка), `cover-show` (открыть отчёт в браузере), `run`, `fmt`,
+  `lint` (зависит от `fmt`), `tidy`, `clean`, `tag` / `tag-push` / `release`
+  (создание и отправка тега версии), `snapshot` (локальная сборка GoReleaser).
 - Перед завершением задачи обязательно: `make test && make lint`.
 
 ## Коммиты
@@ -45,23 +56,30 @@
 
 ```
 .
-├── cmd/hexlet-go-crawler/
-│   └── main.go              # создаёт &http.Client{}, запускает cli.Command
+├── cmd/web-crawler/
+│   └── main.go              # создаёт &http.Client{}, версия из ldflags, запускает cli.Command
 ├── internal/app/
 │   ├── app.go               # urfave/cli: аргументы/флаги -> crawler.Options
 │   └── app_test.go
 ├── crawler/
 │   ├── analyze.go           # Analyze(ctx, Options) ([]byte, error)
 │   ├── options.go           # Options, sentinel-ошибки, валидация
-│   ├── crawler.go           # структура обхода, Run/visit, BFS
-│   ├── fetch.go             # fetch/attempt, режимы чтения, расчёт размера ассета, повторы, rate limiting и timeout попытки
+│   ├── crawler.go           # структура обхода, Run/visitPage, BFS
+│   ├── fetch.go             # fetch/doRequest, режимы чтения, charset, лимит тела, расчёт размера ассета, повторы, rate limiting и timeout попытки
 │   ├── links.go             # типизированное извлечение ссылок и проверка битых ссылок
 │   ├── assets.go            # проверка ассетов, размеры и кэш
 │   ├── seo.go               # SEO-метрики: title, description, h1
 │   ├── report.go            # типы отчёта, SEO и ассетов, JSON-сериализация
+│   ├── url.go               # нормализация URL, host, base href
 │   ├── testdata/            # HTML- и JSON-фикстуры
-│   └── *_test.go
+│   └── *_test.go            # analyze/options/fetch/url/links/assets/crawler/seo/report + helpers
+├── .github/workflows/
+│   ├── ci.yml               # lint, format, race-тесты, build, проверка GoReleaser
+│   └── release.yml          # сборка релиза по тегу v*
+├── .goreleaser.yaml
 ├── Makefile
+├── README.md
+├── AGENTS.md
 ├── .gitignore
 └── .golangci.yml
 ```
@@ -160,12 +178,15 @@ Sentinel-ошибки: `ErrInvalidURL`, `ErrNilHTTPClient`, `ErrInvalidOptions`.
 - Внутренние ссылки, которые всё равно будут обойдены на следующем уровне, отдельно не проверяются; ссылки на текущую страницу пропускаются.
 - Ассеты кэшируются на время запуска по абсолютному URL без fragment: повторный ассет не запрашивается снова, а его данные в отчётах совпадают.
 - URL в `broken_links` и `assets` абсолютный.
+- Относительные ссылки и ассеты разрешаются относительно первого валидного `<base href>` страницы, иначе относительно URL страницы.
+- Тело страницы читается не более 10 MiB; байты сверх лимита игнорируются.
+- Кодировка страницы определяется по BOM, `Content-Type` или `<meta charset>` и приводится к UTF-8.
 - Пустые значения, `#...`, не-HTTP(S) схемы, URL без host и невалидные URL игнорируются.
 - `IndentJSON` влияет только на форматирование (пробелы/переносы), но не на состав и порядок ключей.
 
 ## CLI
 
-`hexlet-go-crawler <url>` (обязательный аргумент) + `--help`.
+`web-crawler <url>` (обязательный аргумент) + `--help`, `--version`.
 
 Флаги:
 
@@ -177,9 +198,21 @@ Sentinel-ошибки: `ErrInvalidURL`, `ErrNilHTTPClient`, `ErrInvalidOptions`.
 | `--timeout` | duration | 15s | per-request timeout |
 | `--rps` | float | 0 | limit requests per second (overrides delay) |
 | `--user-agent` | string | "" | custom user agent |
+| `--version` | flag | | print the version and exit |
+
+`--version` печатает `web-crawler version <version>`. Версия задаётся при сборке через `-ldflags "-X main.version=..."`; в локальной сборке без тега — `dev`, в `make build` — значение `git describe`.
 
 `RPS` имеет приоритет над `Delay`. Глобальное ограничение частоты применяется ко всем HTTP-запросам: страницы, проверки ссылок и ассетов. `User-Agent` добавляется к запросам, если указан. При отмене контекста ожидание rate-лимитера прерывается без зависания.
 
 `Retries` задаёт максимальное число повторных попыток (всего до `Retries + 1` запросов). Повторяются только временные сбои: сетевые ошибки, ошибки чтения тела, `429` и `5xx`; успех прекращает повторы. Перед каждой повторной попыткой выдерживается ненулевая пауза, прерываемая отменой контекста. В отчёт попадает результат последней попытки.
 
 CLI печатает отчёт без изменений: ровно JSON и один завершающий перевод строки, без текста до или после.
+
+## Релизы
+
+- Релиз собирается GoReleaser (`.goreleaser.yaml`) в workflow `.github/workflows/release.yml` по пушу тега `v*`.
+- Артефакты: `linux`, `darwin`, `windows` × `amd64`, `arm64`; архивы `tar.gz` (`zip` для Windows), `checksums.txt`, GitHub Release.
+- Версия передаётся в бинарник через `-ldflags "-X main.version={{.Version}}"`.
+- Теги создаются через `make tag VERSION=1.2.3` (проверяет semver, чистоту дерева и отсутствие тега), отправляются через `make tag-push VERSION=1.2.3` или одной командой `make release VERSION=1.2.3`.
+- Локальная проверка конфигурации: `goreleaser check` и `make snapshot`.
+- CI дополнительно выполняет `goreleaser check`, чтобы конфиг не ломался до релиза.

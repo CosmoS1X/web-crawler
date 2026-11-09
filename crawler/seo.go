@@ -12,7 +12,7 @@ func extractSEO(body []byte) SEO {
 	var (
 		result       SEO
 		titleSeen    bool
-		titleDepth   int
+		inTitle      bool
 		titleBuilder strings.Builder
 	)
 
@@ -24,31 +24,8 @@ func extractSEO(body []byte) SEO {
 			return result
 		}
 
-		if tokenType == html.StartTagToken || tokenType == html.SelfClosingTagToken {
-			tagName, _ := tokenizer.TagName()
-			switch string(tagName) {
-			case "title":
-				if titleSeen {
-					continue
-				}
-				titleSeen = true
-				result.HasTitle = true
-				if tokenType == html.StartTagToken {
-					titleDepth++
-				}
-			case "h1":
-				result.HasH1 = true
-			case "meta":
-				if hasDescription, description := metaDescription(tokenizer); hasDescription && !result.HasDescription {
-					result.HasDescription = true
-					result.Description = description
-				}
-			}
-			continue
-		}
-
 		if tokenType == html.TextToken {
-			if titleDepth > 0 {
+			if inTitle {
 				titleBuilder.Write(tokenizer.Text())
 			}
 			continue
@@ -56,8 +33,33 @@ func extractSEO(body []byte) SEO {
 
 		if tokenType == html.EndTagToken {
 			tagName, _ := tokenizer.TagName()
-			if string(tagName) == "title" && titleDepth > 0 {
-				titleDepth--
+			if string(tagName) == "title" && inTitle {
+				inTitle = false
+			}
+			continue
+		}
+
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+
+		tagName, _ := tokenizer.TagName()
+		switch string(tagName) {
+		case "title":
+			if titleSeen {
+				continue
+			}
+			titleSeen = true
+			result.HasTitle = true
+			if tokenType == html.StartTagToken {
+				inTitle = true
+			}
+		case "h1":
+			result.HasH1 = true
+		case "meta":
+			if hasDescription, description := metaDescription(tokenizer); hasDescription && !result.HasDescription {
+				result.HasDescription = true
+				result.Description = description
 			}
 		}
 	}

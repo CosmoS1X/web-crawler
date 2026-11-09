@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -14,12 +13,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"code/crawler"
+	"github.com/CosmoS1X/web-crawler/crawler"
 )
 
 const (
-	referenceRootURL  = "https://example.com"
-	referenceLogoSize = 12345
+	referenceLogoSize   = 12345
+	referenceScriptSize = 32
+	referenceStyleSize  = 24
 )
 
 type referenceTransport struct {
@@ -28,25 +28,22 @@ type referenceTransport struct {
 
 func (tr referenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	switch {
+	case req.URL.Host == exampleHost && (req.URL.Path == "" || req.URL.Path == "/"):
+		return testResponse(req, tr.pageHTML), nil
+	case req.URL.Host == exampleHost && req.URL.Path == "/about":
+		return responseWithStatus(req, http.StatusOK, ""), nil
+	case req.URL.Host == exampleHost && req.URL.Path == "/missing":
+		return responseWithStatus(req, http.StatusNotFound, ""), nil
+	case req.URL.Host == externalHost && req.URL.Path == "/missing":
+		return responseWithStatus(req, http.StatusNotFound, ""), nil
 	case req.URL.Host == exampleHost && req.URL.Path == "/static/logo.png":
-		return referenceResponse(req, http.StatusOK, strings.Repeat("x", referenceLogoSize)), nil
-	case req.URL.Host == exampleHost:
-		return referenceResponse(req, http.StatusOK, tr.pageHTML), nil
-	case req.URL.Host == "external.example" && req.URL.Path == "/missing":
-		return referenceResponse(req, http.StatusNotFound, ""), nil
+		return responseWithContentLength(req, referenceLogoSize), nil
+	case req.URL.Host == exampleHost && req.URL.Path == "/static/app.js":
+		return responseWithContentLength(req, referenceScriptSize), nil
+	case req.URL.Host == exampleHost && req.URL.Path == "/static/app.css":
+		return responseWithContentLength(req, referenceStyleSize), nil
 	default:
 		return nil, fmt.Errorf("unexpected request: %s", req.URL)
-	}
-}
-
-func referenceResponse(req *http.Request, statusCode int, body string) *http.Response {
-	return &http.Response{
-		StatusCode:    statusCode,
-		Status:        http.StatusText(statusCode),
-		Header:        make(http.Header),
-		Body:          io.NopCloser(strings.NewReader(body)),
-		ContentLength: int64(len(body)),
-		Request:       req,
 	}
 }
 
@@ -54,7 +51,7 @@ func referenceOptions(t *testing.T, indent bool) crawler.Options {
 	t.Helper()
 
 	return crawler.Options{
-		URL:        referenceRootURL,
+		URL:        exampleURL,
 		Depth:      1,
 		Timeout:    time.Second,
 		IndentJSON: indent,
@@ -75,6 +72,12 @@ func TestAnalyzeMatchesReferenceReport(t *testing.T) {
 
 	data, err := crawler.Analyze(t.Context(), referenceOptions(t, true))
 	require.NoError(t, err)
+
+	report := decodeReport(t, data)
+	assert.Equal(t, exampleURL, report.RootURL)
+	assert.Equal(t, 1, report.Depth)
+	require.Len(t, report.Pages, 1)
+	assert.Equal(t, exampleURL, report.Pages[0].URL)
 
 	want := normalizeTimes(strings.TrimSuffix(loadFixture(t, "report_reference.json"), "\n"))
 	assert.Equal(t, want, normalizeTimes(string(data)))

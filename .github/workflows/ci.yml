@@ -22,8 +22,18 @@ jobs:
         with:
           version: v2.15.0
 
+      - name: Check formatting
+        run: golangci-lint fmt --diff
+
       - name: Run Tests
-        run: make test
+        run: make test-race
 
       - name: Run Build
         run: make build
+
+      - name: Check release config
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check

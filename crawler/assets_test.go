@@ -1,12 +1,10 @@
 package crawler_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,31 +12,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"code/crawler"
+	"github.com/CosmoS1X/web-crawler/crawler"
 )
-
-const assetLogoPath = "/logo.png"
 
 func TestAnalyzeAssetFieldPresence(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
-			_, err := io.WriteString(w, `<img src="/ok.png"><script src="/missing.js"></script>`)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, `<img src="/ok.png"><script src="/missing.js"></script>`)
 		case "/ok.png":
-			_, err := io.WriteString(w, "png")
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, "png")
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(srv.Close)
+	})
 
 	data, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        srv.URL,
@@ -71,51 +60,25 @@ func TestAnalyzeAssetFieldPresence(t *testing.T) {
 	assert.Contains(t, missingAsset, "status_code")
 	assert.NotContains(t, missingAsset, "size_bytes")
 	assert.Contains(t, missingAsset, "error")
-
-	rep := decodeReport(t, data)
-	assets := rep.Pages[0].Assets
-	require.Len(t, assets, 2)
-
-	assert.Equal(t, srv.URL+"/ok.png", assets[0].URL)
-	assert.Equal(t, "image", assets[0].Type)
-	assert.Equal(t, http.StatusOK, assets[0].StatusCode)
-	assert.Equal(t, int64(3), assets[0].SizeBytes)
-	assert.Empty(t, assets[0].Error)
-
-	assert.Equal(t, srv.URL+"/missing.js", assets[1].URL)
-	assert.Equal(t, "script", assets[1].Type)
-	assert.Equal(t, http.StatusNotFound, assets[1].StatusCode)
-	assert.Zero(t, assets[1].SizeBytes)
-	assert.Equal(t, http.StatusText(http.StatusNotFound), assets[1].Error)
 }
 
 func TestAnalyzeAssetRequestsCachedAcrossPages(t *testing.T) {
 	t.Parallel()
 
 	var logoCalls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
-			_, err := io.WriteString(w, `<a href="/second">second</a><img src="`+assetLogoPath+`">`)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, `<a href="/second">second</a><img src="`+logoPath+`">`)
 		case "/second":
-			_, err := io.WriteString(w, `<img src="`+assetLogoPath+`">`)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
-		case assetLogoPath:
+			writeBody(t, w, `<img src="`+logoPath+`">`)
+		case logoPath:
 			logoCalls.Add(1)
-			_, err := io.WriteString(w, "logo")
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, "logo")
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(srv.Close)
+	})
 
 	data, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        srv.URL,
@@ -129,7 +92,7 @@ func TestAnalyzeAssetRequestsCachedAcrossPages(t *testing.T) {
 	require.Len(t, rep.Pages, 2)
 	assert.Equal(t, int32(1), logoCalls.Load(), "a cached asset must be requested only once")
 
-	var rootAsset, secondAsset testAsset
+	var rootAsset, secondAsset crawler.Asset
 	for _, p := range rep.Pages {
 		require.Len(t, p.Assets, 1)
 		switch p.URL {
@@ -141,8 +104,8 @@ func TestAnalyzeAssetRequestsCachedAcrossPages(t *testing.T) {
 	}
 
 	assert.Equal(t, rootAsset, secondAsset)
-	assert.Equal(t, srv.URL+assetLogoPath, rootAsset.URL)
-	assert.Equal(t, "image", rootAsset.Type)
+	assert.Equal(t, srv.URL+logoPath, rootAsset.URL)
+	assert.Equal(t, assetTypeImage, rootAsset.Type)
 	assert.Equal(t, int64(len("logo")), rootAsset.SizeBytes)
 }
 
@@ -150,14 +113,11 @@ func TestAnalyzeAssetWithoutContentLength(t *testing.T) {
 	t.Parallel()
 
 	const logoBody = "0123456789"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
-			_, err := io.WriteString(w, `<img src="`+assetLogoPath+`">`)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
-		case assetLogoPath:
+			writeBody(t, w, `<img src="`+logoPath+`">`)
+		case logoPath:
 			w.Header().Set("Content-Type", "image/png")
 			w.WriteHeader(http.StatusOK)
 			flusher, ok := w.(http.Flusher)
@@ -166,15 +126,11 @@ func TestAnalyzeAssetWithoutContentLength(t *testing.T) {
 				return
 			}
 			flusher.Flush()
-			_, err := io.WriteString(w, logoBody)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, logoBody)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(srv.Close)
+	})
 
 	data, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        srv.URL,
@@ -197,18 +153,14 @@ func TestAnalyzeAssetWithoutContentLength(t *testing.T) {
 func TestAnalyzeAssetHTTPError(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
-			_, err := io.WriteString(w, `<script src="/missing.js"></script>`)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, `<script src="/missing.js"></script>`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(srv.Close)
+	})
 
 	data, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        srv.URL,
@@ -224,7 +176,7 @@ func TestAnalyzeAssetHTTPError(t *testing.T) {
 
 	got := rep.Pages[0].Assets[0]
 	assert.Equal(t, srv.URL+"/missing.js", got.URL)
-	assert.Equal(t, "script", got.Type)
+	assert.Equal(t, assetTypeScript, got.Type)
 	assert.Equal(t, http.StatusNotFound, got.StatusCode)
 	assert.Zero(t, got.SizeBytes)
 	assert.Equal(t, http.StatusText(http.StatusNotFound), got.Error)
@@ -233,21 +185,14 @@ func TestAnalyzeAssetHTTPError(t *testing.T) {
 func TestAnalyzeAssetTypesAndDeduplication(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
-			_, err := io.WriteString(w, `<img src="/a.png"><img src="/a.png"><script src="/app.js"></script><link rel="stylesheet" href="/s.css"><link rel="icon" href="/f.ico">`)
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, `<img src="/a.png"><img src="/a.png"><script src="/app.js"></script><link rel="stylesheet" href="/s.css"><link rel="icon" href="/f.ico">`)
 		default:
-			_, err := io.WriteString(w, "asset")
-			if err != nil {
-				t.Errorf("write response: %v", err)
-			}
+			writeBody(t, w, "asset")
 		}
-	}))
-	t.Cleanup(srv.Close)
+	})
 
 	data, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        srv.URL,
@@ -267,15 +212,17 @@ func TestAnalyzeAssetTypesAndDeduplication(t *testing.T) {
 		srv.URL + "/app.js",
 		srv.URL + "/s.css",
 	}, []string{assets[0].URL, assets[1].URL, assets[2].URL})
-	assert.Equal(t, []string{"image", "script", "style"},
+	assert.Equal(t, []string{assetTypeImage, assetTypeScript, assetTypeStyle},
 		[]string{assets[0].Type, assets[1].Type, assets[2].Type})
 }
 
-type assetFailingTransport struct{}
+type assetFailingTransport struct {
+	pageHTML string
+}
 
-func (assetFailingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (tr assetFailingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Host == exampleHost {
-		return testResponse(req, `<img src="https://cdn.invalid/logo.png">`), nil
+		return testResponse(req, tr.pageHTML), nil
 	}
 	return nil, errors.New("connection failed")
 }
@@ -283,45 +230,153 @@ func (assetFailingTransport) RoundTrip(req *http.Request) (*http.Response, error
 func TestAnalyzeAssetNetworkError(t *testing.T) {
 	t.Parallel()
 
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		HTTPClient: &http.Client{Transport: assetFailingTransport{}},
-	})
-	require.NoError(t, err)
+	tests := []struct {
+		name     string
+		pageHTML string
+		wantURL  string
+		wantType string
+	}{
+		{
+			name:     "image",
+			pageHTML: `<img src="https://cdn.invalid/logo.png">`,
+			wantURL:  "https://cdn.invalid/logo.png",
+			wantType: assetTypeImage,
+		},
+		{
+			name:     "script",
+			pageHTML: `<script src="https://cdn.invalid/app.js"></script>`,
+			wantURL:  "https://cdn.invalid/app.js",
+			wantType: assetTypeScript,
+		},
+	}
 
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	require.Len(t, rep.Pages[0].Assets, 1)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	got := rep.Pages[0].Assets[0]
-	assert.Equal(t, "https://cdn.invalid/logo.png", got.URL)
-	assert.Equal(t, "image", got.Type)
-	assert.Zero(t, got.StatusCode)
-	assert.Zero(t, got.SizeBytes)
-	assert.Contains(t, got.Error, "connection failed")
+			data, err := crawler.Analyze(t.Context(), crawler.Options{
+				URL:        exampleURL,
+				Depth:      0,
+				Timeout:    time.Second,
+				HTTPClient: &http.Client{Transport: assetFailingTransport{pageHTML: tt.pageHTML}},
+			})
+			require.NoError(t, err)
+
+			rep := decodeReport(t, data)
+			require.Len(t, rep.Pages, 1)
+			require.Len(t, rep.Pages[0].Assets, 1)
+
+			got := rep.Pages[0].Assets[0]
+			assert.Equal(t, tt.wantURL, got.URL)
+			assert.Equal(t, tt.wantType, got.Type)
+			assert.Zero(t, got.StatusCode)
+			assert.Zero(t, got.SizeBytes)
+			assert.Contains(t, got.Error, "connection failed")
+		})
+	}
 }
 
-func TestAnalyzePageErrorHasEmptyAssets(t *testing.T) {
+func TestAnalyzeAssetSameURLDifferentTypes(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
+	var assetCalls atomic.Int32
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			writeBody(t, w, `<img src="/shared"><script src="/shared"></script>`)
+		case "/shared":
+			assetCalls.Add(1)
+			w.Header().Set("Content-Length", "5")
+			w.WriteHeader(http.StatusOK)
+			writeBody(t, w, "12345")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
 
 	data, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        srv.URL,
 		Depth:      0,
 		Timeout:    time.Second,
-		IndentJSON: true,
 		HTTPClient: srv.Client(),
 	})
 	require.NoError(t, err)
 
 	rep := decodeReport(t, data)
 	require.Len(t, rep.Pages, 1)
+	require.Len(t, rep.Pages[0].Assets, 2)
+
+	image, script := rep.Pages[0].Assets[0], rep.Pages[0].Assets[1]
+	assert.Equal(t, assetTypeImage, image.Type)
+	assert.Equal(t, assetTypeScript, script.Type)
+	assert.Equal(t, srv.URL+"/shared", image.URL)
+	assert.Equal(t, srv.URL+"/shared", script.URL)
+	assert.Equal(t, int64(5), image.SizeBytes)
+	assert.Equal(t, int64(5), script.SizeBytes)
+	assert.Equal(t, http.StatusOK, image.StatusCode)
+	assert.Equal(t, http.StatusOK, script.StatusCode)
+	assert.Equal(t, int32(1), assetCalls.Load(), "shared asset URL must be fetched once")
+}
+
+type assetCancelingTransport struct {
+	cancel context.CancelFunc
+	calls  atomic.Int32
+}
+
+func (tr *assetCancelingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.calls.Add(1)
+	if req.URL.Path == logoPath {
+		tr.cancel()
+		return nil, context.Canceled
+	}
+	return testResponse(req, `<img src="`+logoPath+`">`), nil
+}
+
+func TestAnalyzeAssetsContextCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	data, err := crawler.Analyze(ctx, crawler.Options{
+		URL:        exampleURL,
+		Depth:      0,
+		Timeout:    time.Second,
+		HTTPClient: &http.Client{Transport: &assetCancelingTransport{cancel: cancel}},
+	})
+	require.NoError(t, err)
+
+	rep := decodeReport(t, data)
+	require.Len(t, rep.Pages, 1)
 	assert.Empty(t, rep.Pages[0].Assets)
-	require.True(t, strings.Contains(string(data), `"assets": []`))
+	assert.NotContains(t, string(data), context.Canceled.Error())
+}
+
+func TestAnalyzeMalformedAssetURLIgnored(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			writeBody(t, w, `<img src="http://[::1"><img src="`+logoPath+`">`)
+		case logoPath:
+			w.Header().Set("Content-Length", "4")
+			writeBody(t, w, "logo")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	data, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        srv.URL,
+		Depth:      0,
+		Timeout:    time.Second,
+		HTTPClient: srv.Client(),
+	})
+	require.NoError(t, err)
+
+	rep := decodeReport(t, data)
+	require.Len(t, rep.Pages, 1)
+	require.Len(t, rep.Pages[0].Assets, 1)
+	assert.Equal(t, srv.URL+logoPath, rep.Pages[0].Assets[0].URL)
 }

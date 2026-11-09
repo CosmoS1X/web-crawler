@@ -10,12 +10,17 @@
       "status": "ok",
       "seo": {
         "has_title": true,
-        "title": "Example title",
+        "title": "Example Title",
         "has_description": true,
-        "description": "Example description",
+        "description": "Example \"description\"",
         "has_h1": true
       },
       "broken_links": [
+        {
+          "url": "https://example.com/missing",
+          "status_code": 404,
+          "error": "Not Found"
+        },
         {
           "url": "https://external.example/missing",
           "status_code": 404,
@@ -27,6 +32,18 @@
           "url": "https://example.com/static/logo.png",
           "type": "image",
           "size_bytes": 12345,
+          "status_code": 200
+        },
+        {
+          "url": "https://example.com/static/app.js",
+          "type": "script",
+          "size_bytes": 32,
+          "status_code": 200
+        },
+        {
+          "url": "https://example.com/static/app.css",
+          "type": "style",
+          "size_bytes": 24,
           "status_code": 200
         }
       ],

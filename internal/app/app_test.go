@@ -15,28 +15,30 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 
-	"code/crawler"
-	"code/internal/app"
+	"github.com/CosmoS1X/web-crawler/crawler"
+	"github.com/CosmoS1X/web-crawler/internal/app"
 )
 
-const commandName = "hexlet-go-crawler"
-
-type testReport struct {
-	RootURL string `json:"root_url"`
-	Pages   []struct {
-		URL        string `json:"url"`
-		HTTPStatus int    `json:"http_status"`
-		Status     string `json:"status"`
-		Error      string `json:"error"`
-	} `json:"pages"`
-}
+const (
+	commandName = "web-crawler"
+	testVersion = "1.2.3"
+)
 
 func newTestCommand(client *http.Client) (*cli.Command, *bytes.Buffer) {
-	cmd := app.New(client)
+	cmd := app.New(client, testVersion)
 	buf := &bytes.Buffer{}
 	cmd.Writer = buf
 	cmd.ErrWriter = buf
 	return cmd, buf
+}
+
+func TestVersionFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd, buf := newTestCommand(&http.Client{})
+
+	require.NoError(t, cmd.Run(t.Context(), []string{commandName, "--version"}))
+	assert.Equal(t, commandName+" version "+testVersion+"\n", buf.String())
 }
 
 func TestHelpDescribesFlags(t *testing.T) {
@@ -60,7 +62,7 @@ func TestHelpDescribesFlags(t *testing.T) {
 	}
 }
 
-func TestRunPrintsReport(t *testing.T) {
+func TestRunPrintsJSONReport(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -71,11 +73,18 @@ func TestRunPrintsReport(t *testing.T) {
 	cmd, buf := newTestCommand(srv.Client())
 	require.NoError(t, cmd.Run(t.Context(), []string{commandName, srv.URL}))
 
-	var rep testReport
+	var rep crawler.Report
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rep), "output: %s", buf.String())
 	assert.Equal(t, srv.URL, rep.RootURL)
 	require.Len(t, rep.Pages, 1)
 	assert.Equal(t, http.StatusOK, rep.Pages[0].HTTPStatus)
+
+	out := buf.String()
+	require.NotEmpty(t, out)
+	assert.Equal(t, "{", out[:1], "output must not contain text before the JSON object")
+	assert.True(t, strings.HasSuffix(out, "}\n"), "output must end with a single trailing newline")
+	assert.False(t, strings.HasSuffix(out, "\n\n"), "output must not contain extra trailing newlines")
+	assert.True(t, json.Valid([]byte(strings.TrimSuffix(out, "\n"))))
 }
 
 func TestRunUsesRetriesFlag(t *testing.T) {
@@ -96,7 +105,7 @@ func TestRunUsesRetriesFlag(t *testing.T) {
 		commandName, "--retries", "2", srv.URL,
 	}))
 
-	var rep testReport
+	var rep crawler.Report
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rep), "output: %s", buf.String())
 	require.Len(t, rep.Pages, 1)
 	assert.Equal(t, http.StatusOK, rep.Pages[0].HTTPStatus)
@@ -116,29 +125,10 @@ func TestRunNetworkErrorExitsSuccessfully(t *testing.T) {
 	cmd, buf := newTestCommand(&http.Client{Transport: failingTransport{}})
 	require.NoError(t, cmd.Run(t.Context(), []string{commandName, "https://example.com"}))
 
-	var rep testReport
+	var rep crawler.Report
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rep), "output: %s", buf.String())
 	require.Len(t, rep.Pages, 1)
 	assert.Equal(t, "error", rep.Pages[0].Status)
-}
-
-func TestRunPrintsJSONVerbatim(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	cmd, buf := newTestCommand(srv.Client())
-	require.NoError(t, cmd.Run(t.Context(), []string{commandName, srv.URL}))
-
-	out := buf.String()
-	require.NotEmpty(t, out)
-	assert.Equal(t, "{", out[:1], "output must not contain text before the JSON object")
-	assert.True(t, strings.HasSuffix(out, "}\n"), "output must end with a single trailing newline")
-	assert.False(t, strings.HasSuffix(out, "\n\n"), "output must not contain extra trailing newlines")
-	assert.True(t, json.Valid([]byte(strings.TrimSuffix(out, "\n"))))
 }
 
 func TestRunRequiresURL(t *testing.T) {

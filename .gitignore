@@ -1,4 +1,5 @@
 /bin/
+/dist/
 /tmp/
 /.vscode/
 coverage.out

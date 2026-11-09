@@ -9,5 +9,5 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return nil, err
 	}
 
-	return c.Run(ctx).marshal(opts.IndentJSON)
+	return c.run(ctx).marshal(opts.IndentJSON)
 }

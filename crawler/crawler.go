@@ -13,12 +13,14 @@ import (
 
 type crawler struct {
 	opts       Options
+	root       *url.URL
 	limiter    *rate.Limiter
-	assetCache map[string]Asset
+	assetCache map[string]assetMeta
 }
 
 func newCrawler(opts Options) (*crawler, error) {
-	if err := opts.validate(); err != nil {
+	root, err := opts.validate()
+	if err != nil {
 		return nil, err
 	}
 
@@ -32,35 +34,26 @@ func newCrawler(opts Options) (*crawler, error) {
 
 	return &crawler{
 		opts:       opts,
+		root:       root,
 		limiter:    limiter,
-		assetCache: make(map[string]Asset),
+		assetCache: make(map[string]assetMeta),
 	}, nil
 }
 
-func (c *crawler) Run(ctx context.Context) *Report {
+func (c *crawler) run(ctx context.Context) *Report {
 	generatedAt := time.Now().UTC().Truncate(time.Second)
-
-	rootURL := c.opts.URL
-	rootParsed, err := url.Parse(rootURL)
-	if err != nil {
-		rootParsed = &url.URL{}
-	}
 
 	visited := make(map[string]struct{})
 	pages := make([]Page, 0)
 
 	type queueItem struct {
-		url   string
+		url   *url.URL
 		depth int
 	}
 
 	queue := make([]queueItem, 0)
-	key0 := normalizeURLForKey(rootURL)
-	if key0 == "" {
-		key0 = rootURL
-	}
-	visited[key0] = struct{}{}
-	queue = append(queue, queueItem{url: rootURL, depth: 0})
+	visited[canonicalURL(c.root)] = struct{}{}
+	queue = append(queue, queueItem{url: c.root, depth: 0})
 
 	for len(queue) > 0 {
 		if ctx.Err() != nil {
@@ -70,8 +63,8 @@ func (c *crawler) Run(ctx context.Context) *Report {
 		current := queue[0]
 		queue = queue[1:]
 
-		p, body := c.visit(ctx, current.url, current.depth)
-		pages = append(pages, p)
+		page, base, links := c.visitPage(ctx, current.url, current.depth)
+		pages = append(pages, page)
 
 		if ctx.Err() != nil {
 			break
@@ -81,41 +74,19 @@ func (c *crawler) Run(ctx context.Context) *Report {
 			continue
 		}
 
-		if len(body) == 0 {
-			continue
-		}
-
-		base, parseErr := url.Parse(current.url)
-		if parseErr != nil {
-			continue
-		}
-
-		for _, link := range extractLinks(body) {
-			if link.Kind != linkNavigation {
-				continue
-			}
+		for _, link := range links {
 			if ctx.Err() != nil {
 				break
 			}
-			linkURL, ok := resolveLink(base, link.URL)
+			linkURL, ok := resolveNavigationLink(base, link)
 			if !ok {
 				continue
 			}
-			linkParsed, parseErr := url.Parse(linkURL)
-			if parseErr != nil {
-				continue
-			}
-			if rootParsed.Host != "" && linkParsed.Host != rootParsed.Host {
-				continue
-			}
-			if linkParsed.Scheme != schemeHTTP && linkParsed.Scheme != schemeHTTPS {
+			if !c.isInternal(linkURL) {
 				continue
 			}
 
-			key := normalizeURLForKey(linkURL)
-			if key == "" {
-				continue
-			}
+			key := canonicalURL(linkURL)
 			if _, exists := visited[key]; exists {
 				continue
 			}
@@ -125,10 +96,10 @@ func (c *crawler) Run(ctx context.Context) *Report {
 	}
 
 	slices.SortFunc(pages, func(a, b Page) int {
-		if compared := cmp.Compare(a.Depth, b.Depth); compared != 0 {
-			return compared
-		}
-		return cmp.Compare(a.URL, b.URL)
+		return cmp.Or(
+			cmp.Compare(a.Depth, b.Depth),
+			cmp.Compare(a.URL, b.URL),
+		)
 	})
 
 	return &Report{
@@ -139,30 +110,42 @@ func (c *crawler) Run(ctx context.Context) *Report {
 	}
 }
 
-func (c *crawler) visit(ctx context.Context, rawURL string, depth int) (p Page, body []byte) {
+func (c *crawler) visitPage(
+	ctx context.Context,
+	pageURL *url.URL,
+	depth int,
+) (page Page, base *url.URL, links []extractedLink) {
 	discoveredAt := time.Now().UTC().Truncate(time.Second)
-	result := c.fetch(ctx, http.MethodGet, rawURL, fetchFullBody)
+	result := c.fetch(ctx, http.MethodGet, pageURL.String(), fetchFullBody)
 
-	p = Page{
-		URL:          rawURL,
+	page = Page{
+		URL:          pageURL.String(),
 		Depth:        depth,
 		HTTPStatus:   result.StatusCode,
 		Status:       statusOK,
 		DiscoveredAt: discoveredAt,
 	}
 	if result.Err != nil {
-		p.Status = statusError
-		p.Error = result.Err.Error()
-		return p, nil
+		page.Status = statusError
+		page.Error = result.Err.Error()
+		return page, pageURL, nil
 	}
 
 	if result.StatusCode >= http.StatusBadRequest {
-		p.Status = statusError
-		p.Error = statusErrorText(result.StatusCode)
+		page.Status = statusError
+		page.Error = statusErrorText(result.StatusCode)
 	}
 
-	p.SEO = extractSEO(result.Body)
-	p.Assets = c.collectAssets(ctx, rawURL, result.Body)
-	p.BrokenLinks = c.findBrokenLinks(ctx, rawURL, depth, result.Body)
-	return p, result.Body
+	links, baseHrefs := extractLinks(result.Body)
+	base = resolveBase(pageURL, baseHrefs)
+
+	page.SEO = extractSEO(result.Body)
+	page.Assets = c.collectAssets(ctx, base, links)
+	page.BrokenLinks = c.findBrokenLinks(ctx, pageURL, base, depth, links)
+	return page, base, links
+}
+
+// isInternal reports whether the URL points to the crawl root host.
+func (c *crawler) isInternal(u *url.URL) bool {
+	return normalizedHost(u) == normalizedHost(c.root)
 }
