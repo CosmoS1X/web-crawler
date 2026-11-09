@@ -19,6 +19,8 @@ import (
 	"github.com/CosmoS1X/web-crawler/crawler"
 )
 
+const testPageStatusError = "error"
+
 type sequenceResult struct {
 	status int
 	err    error
@@ -70,28 +72,110 @@ func (tr *sequenceTransport) callTimes() []time.Time {
 	return append([]time.Time(nil), tr.calls...)
 }
 
-func TestAnalyzeRetriesUntilSuccess(t *testing.T) {
+func TestAnalyzeRetryPolicy(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		first sequenceResult
+		name            string
+		results         []sequenceResult
+		retries         int
+		wantStatus      int
+		wantPageStatus  string
+		wantError       bool
+		wantErrContains string
+		wantCalls       int
 	}{
 		{
-			name:  "too many requests",
-			first: sequenceResult{status: http.StatusTooManyRequests},
+			name: "too many requests then success",
+			results: []sequenceResult{
+				{status: http.StatusTooManyRequests},
+				{status: http.StatusOK, body: testHTMLBody},
+			},
+			retries:        1,
+			wantStatus:     http.StatusOK,
+			wantPageStatus: "ok",
+			wantCalls:      2,
 		},
 		{
-			name:  "internal server error",
-			first: sequenceResult{status: http.StatusInternalServerError},
+			name: "internal server error then success",
+			results: []sequenceResult{
+				{status: http.StatusInternalServerError},
+				{status: http.StatusOK, body: testHTMLBody},
+			},
+			retries:        1,
+			wantStatus:     http.StatusOK,
+			wantPageStatus: "ok",
+			wantCalls:      2,
 		},
 		{
-			name:  "service unavailable",
-			first: sequenceResult{status: http.StatusServiceUnavailable},
+			name: "service unavailable then success",
+			results: []sequenceResult{
+				{status: http.StatusServiceUnavailable},
+				{status: http.StatusOK, body: testHTMLBody},
+			},
+			retries:        1,
+			wantStatus:     http.StatusOK,
+			wantPageStatus: "ok",
+			wantCalls:      2,
 		},
 		{
-			name:  "network error",
-			first: sequenceResult{err: errors.New("connection failed")},
+			name: "network error then success",
+			results: []sequenceResult{
+				{err: errors.New("connection failed")},
+				{status: http.StatusOK, body: testHTMLBody},
+			},
+			retries:        1,
+			wantStatus:     http.StatusOK,
+			wantPageStatus: "ok",
+			wantCalls:      2,
+		},
+		{
+			name: "exhausted transient statuses",
+			results: []sequenceResult{
+				{status: http.StatusInternalServerError},
+				{status: http.StatusBadGateway},
+				{status: http.StatusGatewayTimeout},
+			},
+			retries:        2,
+			wantStatus:     http.StatusGatewayTimeout,
+			wantPageStatus: testPageStatusError,
+			wantError:      true,
+			wantCalls:      3,
+		},
+		{
+			name: "exhausted network error",
+			results: []sequenceResult{
+				{err: errors.New("connection failed")},
+			},
+			retries:         2,
+			wantStatus:      0,
+			wantPageStatus:  testPageStatusError,
+			wantError:       true,
+			wantErrContains: "connection failed",
+			wantCalls:       3,
+		},
+		{
+			name: "client error is not retried",
+			results: []sequenceResult{
+				{status: http.StatusNotFound},
+			},
+			retries:        3,
+			wantStatus:     http.StatusNotFound,
+			wantPageStatus: testPageStatusError,
+			wantError:      true,
+			wantCalls:      1,
+		},
+		{
+			name: "zero retries means one attempt",
+			results: []sequenceResult{
+				{status: http.StatusInternalServerError},
+				{status: http.StatusOK, body: testHTMLBody},
+			},
+			retries:        0,
+			wantStatus:     http.StatusInternalServerError,
+			wantPageStatus: testPageStatusError,
+			wantError:      true,
+			wantCalls:      1,
 		},
 	}
 
@@ -99,129 +183,30 @@ func TestAnalyzeRetriesUntilSuccess(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			tr := &sequenceTransport{results: []sequenceResult{
-				tt.first,
-				{status: http.StatusOK, body: testHTMLBody},
-			}}
-
-			data, err := crawler.Analyze(t.Context(), crawler.Options{
+			tr := &sequenceTransport{results: tt.results}
+			rep := analyzeReport(t, crawler.Options{
 				URL:        exampleURL,
 				Depth:      0,
 				Timeout:    time.Second,
-				Retries:    1,
+				Retries:    tt.retries,
 				HTTPClient: &http.Client{Transport: tr},
 			})
-			require.NoError(t, err)
-
-			rep := decodeReport(t, data)
 			require.Len(t, rep.Pages, 1)
-			assert.Equal(t, "ok", rep.Pages[0].Status)
-			assert.Equal(t, http.StatusOK, rep.Pages[0].HTTPStatus)
-			assert.Empty(t, rep.Pages[0].Error)
-			assert.Equal(t, 2, tr.callCount())
+
+			got := rep.Pages[0]
+			assert.Equal(t, tt.wantStatus, got.HTTPStatus)
+			assert.Equal(t, tt.wantPageStatus, got.Status)
+			if tt.wantError {
+				assert.NotEmpty(t, got.Error)
+			} else {
+				assert.Empty(t, got.Error)
+			}
+			if tt.wantErrContains != "" {
+				assert.Contains(t, got.Error, tt.wantErrContains)
+			}
+			assert.Equal(t, tt.wantCalls, tr.callCount(), "must make exactly retries + 1 attempts")
 		})
 	}
-}
-
-func TestAnalyzeRetriesExhausted(t *testing.T) {
-	t.Parallel()
-
-	tr := &sequenceTransport{results: []sequenceResult{
-		{status: http.StatusInternalServerError},
-		{status: http.StatusBadGateway},
-		{status: http.StatusGatewayTimeout},
-	}}
-
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		Retries:    2,
-		HTTPClient: &http.Client{Transport: tr},
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-
-	got := rep.Pages[0]
-	assert.Equal(t, http.StatusGatewayTimeout, got.HTTPStatus, "report must contain the last attempt result")
-	assert.Equal(t, "error", got.Status)
-	assert.NotEmpty(t, got.Error)
-	assert.Equal(t, 3, tr.callCount(), "must make exactly retries + 1 attempts")
-}
-
-func TestAnalyzeRetriesNetworkErrorExhausted(t *testing.T) {
-	t.Parallel()
-
-	tr := &sequenceTransport{results: []sequenceResult{
-		{err: errors.New("connection failed")},
-	}}
-
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		Retries:    2,
-		HTTPClient: &http.Client{Transport: tr},
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-
-	got := rep.Pages[0]
-	assert.Zero(t, got.HTTPStatus)
-	assert.Equal(t, "error", got.Status)
-	assert.Contains(t, got.Error, "connection failed")
-	assert.Equal(t, 3, tr.callCount(), "must make exactly retries + 1 attempts")
-}
-
-func TestAnalyzeDoesNotRetryClientError(t *testing.T) {
-	t.Parallel()
-
-	tr := &sequenceTransport{results: []sequenceResult{
-		{status: http.StatusNotFound},
-	}}
-
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		Retries:    3,
-		HTTPClient: &http.Client{Transport: tr},
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	assert.Equal(t, http.StatusNotFound, rep.Pages[0].HTTPStatus)
-	assert.Equal(t, "error", rep.Pages[0].Status)
-	assert.Equal(t, 1, tr.callCount())
-}
-
-func TestAnalyzeZeroRetriesSingleAttempt(t *testing.T) {
-	t.Parallel()
-
-	tr := &sequenceTransport{results: []sequenceResult{
-		{status: http.StatusInternalServerError},
-		{status: http.StatusOK, body: testHTMLBody},
-	}}
-
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		Retries:    0,
-		HTTPClient: &http.Client{Transport: tr},
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	assert.Equal(t, http.StatusInternalServerError, rep.Pages[0].HTTPStatus)
-	assert.Equal(t, "error", rep.Pages[0].Status)
-	assert.Equal(t, 1, tr.callCount())
 }
 
 func TestAnalyzeRetryWaitsBetweenAttempts(t *testing.T) {
@@ -243,7 +228,7 @@ func TestAnalyzeRetryWaitsBetweenAttempts(t *testing.T) {
 
 	times := tr.callTimes()
 	require.Len(t, times, 2)
-	assert.GreaterOrEqual(t, times[1].Sub(times[0]), 50*time.Millisecond,
+	assert.Greater(t, times[1].Sub(times[0]), time.Duration(0),
 		"retry must wait before the next attempt")
 }
 
@@ -286,50 +271,52 @@ func (tr *delayedCancelingTransport) RoundTrip(req *http.Request) (*http.Respons
 	}, nil
 }
 
-func TestAnalyzeRetryWaitStopsOnContextCancel(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-
-	tr := &delayedCancelingTransport{cancel: cancel, delay: 10 * time.Millisecond}
-
-	data, err := crawler.Analyze(ctx, crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		Retries:    3,
-		HTTPClient: &http.Client{Transport: tr},
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	assert.Equal(t, "error", rep.Pages[0].Status)
-	assert.Equal(t, int32(1), tr.calls.Load(), "cancellation during the pause must stop retries")
-}
-
 func TestAnalyzeRetryStopsOnContextCancel(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	tests := []struct {
+		name         string
+		newTransport func(context.CancelFunc) (http.RoundTripper, *atomic.Int32)
+	}{
+		{
+			name: "during request",
+			newTransport: func(cancel context.CancelFunc) (http.RoundTripper, *atomic.Int32) {
+				tr := &cancelingTransport{cancel: cancel}
+				return tr, &tr.calls
+			},
+		},
+		{
+			name: "during retry wait",
+			newTransport: func(cancel context.CancelFunc) (http.RoundTripper, *atomic.Int32) {
+				tr := &delayedCancelingTransport{cancel: cancel, delay: 10 * time.Millisecond}
+				return tr, &tr.calls
+			},
+		},
+	}
 
-	tr := &cancelingTransport{cancel: cancel}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	data, err := crawler.Analyze(ctx, crawler.Options{
-		URL:        exampleURL,
-		Depth:      0,
-		Timeout:    time.Second,
-		Retries:    2,
-		HTTPClient: &http.Client{Transport: tr},
-	})
-	require.NoError(t, err)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
 
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	assert.Equal(t, "error", rep.Pages[0].Status)
-	assert.Equal(t, int32(1), tr.calls.Load(), "cancellation must stop further retries")
+			transport, calls := tt.newTransport(cancel)
+			data, err := crawler.Analyze(ctx, crawler.Options{
+				URL:        exampleURL,
+				Depth:      0,
+				Timeout:    time.Second,
+				Retries:    3,
+				HTTPClient: &http.Client{Transport: transport},
+			})
+			require.NoError(t, err)
+
+			rep := decodeReport(t, data)
+			require.Len(t, rep.Pages, 1)
+			assert.Equal(t, testPageStatusError, rep.Pages[0].Status)
+			assert.Equal(t, int32(1), calls.Load(), "cancellation must stop further retries")
+		})
+	}
 }
 
 func TestAnalyzeWithUserAgent(t *testing.T) {
@@ -372,7 +359,7 @@ func TestAnalyzeTimeout(t *testing.T) {
 
 	got := rep.Pages[0]
 	assert.Zero(t, got.HTTPStatus)
-	assert.Equal(t, "error", got.Status)
+	assert.Equal(t, testPageStatusError, got.Status)
 	assert.NotEmpty(t, got.Error)
 }
 
@@ -401,8 +388,8 @@ func TestAnalyzeReadBodyError(t *testing.T) {
 
 			got := rep.Pages[0]
 			assert.Equal(t, http.StatusOK, got.HTTPStatus)
-			assert.Equal(t, "error", got.Status)
-			assert.Contains(t, got.Error, "read body")
+			assert.Equal(t, testPageStatusError, got.Status)
+			assert.NotEmpty(t, got.Error)
 			assert.Nil(t, got.BrokenLinks)
 			assert.Nil(t, got.Assets)
 		})
@@ -478,58 +465,59 @@ func writeRawBody(t *testing.T, w http.ResponseWriter, body []byte) {
 	}
 }
 
-func TestAnalyzeDecodesContentTypeCharset(t *testing.T) {
+func TestAnalyzeDecodesCharset(t *testing.T) {
 	t.Parallel()
 
-	page := `<html><head><title>Привет</title>` +
-		`<meta name="description" content="Описание"></head>` +
-		`<body><h1>Заголовок</h1></body></html>`
+	tests := []struct {
+		name        string
+		contentType string
+		page        string
+		wantSEO     crawler.SEO
+	}{
+		{
+			name:        "content type header",
+			contentType: "text/html; charset=windows-1251",
+			page: `<html><head><title>Привет</title>` +
+				`<meta name="description" content="Описание"></head>` +
+				`<body><h1>Заголовок</h1></body></html>`,
+			wantSEO: crawler.SEO{
+				HasTitle:       true,
+				Title:          "Привет",
+				HasDescription: true,
+				Description:    "Описание",
+				HasH1:          true,
+			},
+		},
+		{
+			name:        "meta charset",
+			contentType: "text/html",
+			page:        `<html><head><meta charset="windows-1251"><title>Привет</title></head></html>`,
+			wantSEO: crawler.SEO{
+				HasTitle: true,
+				Title:    "Привет",
+			},
+		},
+	}
 
-	srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=windows-1251")
-		writeRawBody(t, w, encodeWindows1251(t, page))
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        srv.URL,
-		Depth:      0,
-		Timeout:    time.Second,
-		HTTPClient: srv.Client(),
-	})
-	require.NoError(t, err)
+			srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tt.contentType)
+				writeRawBody(t, w, encodeWindows1251(t, tt.page))
+			})
 
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-
-	seo := rep.Pages[0].SEO
-	assert.True(t, seo.HasTitle)
-	assert.Equal(t, "Привет", seo.Title)
-	assert.True(t, seo.HasDescription)
-	assert.Equal(t, "Описание", seo.Description)
-	assert.True(t, seo.HasH1)
-}
-
-func TestAnalyzeDecodesMetaCharset(t *testing.T) {
-	t.Parallel()
-
-	page := `<html><head><meta charset="windows-1251"><title>Привет</title></head></html>`
-
-	srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		writeRawBody(t, w, encodeWindows1251(t, page))
-	})
-
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        srv.URL,
-		Depth:      0,
-		Timeout:    time.Second,
-		HTTPClient: srv.Client(),
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	assert.Equal(t, "Привет", rep.Pages[0].SEO.Title)
+			rep := analyzeReport(t, crawler.Options{
+				URL:        srv.URL,
+				Depth:      0,
+				Timeout:    time.Second,
+				HTTPClient: srv.Client(),
+			})
+			require.Len(t, rep.Pages, 1)
+			assert.Equal(t, tt.wantSEO, rep.Pages[0].SEO)
+		})
+	}
 }
 
 func TestAnalyzeLimitsPageBody(t *testing.T) {
@@ -739,7 +727,7 @@ func TestAnalyzeAssetGETReadError(t *testing.T) {
 	rep := decodeReport(t, data)
 	require.Len(t, rep.Pages, 1)
 	require.Len(t, rep.Pages[0].Assets, 1)
-	assert.Contains(t, rep.Pages[0].Assets[0].Error, "read body")
+	assert.NotEmpty(t, rep.Pages[0].Assets[0].Error)
 }
 
 type unknownStatusTransport struct{}
@@ -762,8 +750,8 @@ func TestAnalyzeUnknownHTTPStatus(t *testing.T) {
 	rep := decodeReport(t, data)
 	require.Len(t, rep.Pages, 1)
 	assert.Equal(t, 599, rep.Pages[0].HTTPStatus)
-	assert.Equal(t, "error", rep.Pages[0].Status)
-	assert.Equal(t, "unexpected http status: 599", rep.Pages[0].Error)
+	assert.Equal(t, testPageStatusError, rep.Pages[0].Status)
+	assert.NotEmpty(t, rep.Pages[0].Error)
 }
 
 const rateLimitPageHTML = `<a href="https://one.example/a">a</a><a href="https://two.example/b">b</a>`

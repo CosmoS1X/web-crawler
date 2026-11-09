@@ -52,6 +52,22 @@ func analyzeReport(t *testing.T, opts crawler.Options) crawler.Report {
 	return decodeReport(t, data)
 }
 
+func pageURLs(rep crawler.Report) []string {
+	urls := make([]string, 0, len(rep.Pages))
+	for i := range rep.Pages {
+		urls = append(urls, rep.Pages[i].URL)
+	}
+	return urls
+}
+
+func absoluteURLs(base string, paths []string) []string {
+	urls := make([]string, 0, len(paths))
+	for _, path := range paths {
+		urls = append(urls, base+path)
+	}
+	return urls
+}
+
 func testResponse(req *http.Request, body string) *http.Response {
 	return responseWithStatus(req, http.StatusOK, body)
 }
@@ -96,6 +112,21 @@ func newPageServer(t *testing.T, pageHTML string, statuses map[string]int) *http
 			statusCode = http.StatusNotFound
 		}
 		w.WriteHeader(statusCode)
+	})
+}
+
+// newRouteServer serves the configured body for each path and returns 404 for
+// unknown paths.
+func newRouteServer(t *testing.T, routes map[string]string) *httptest.Server {
+	t.Helper()
+
+	return newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, ok := routes[r.URL.Path]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeBody(t, w, body)
 	})
 }
 

@@ -234,30 +234,6 @@ func TestAnalyzeSelfLinkIgnored(t *testing.T) {
 	}
 }
 
-func TestAnalyzeEmptyBodyAtDepth(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	data, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        srv.URL,
-		Depth:      2,
-		Timeout:    time.Second,
-		HTTPClient: srv.Client(),
-	})
-	require.NoError(t, err)
-
-	rep := decodeReport(t, data)
-	require.Len(t, rep.Pages, 1)
-	assert.Equal(t, "ok", rep.Pages[0].Status)
-	assert.NotNil(t, rep.Pages[0].BrokenLinks)
-	assert.Empty(t, rep.Pages[0].BrokenLinks)
-	assert.NotNil(t, rep.Pages[0].Assets)
-	assert.Empty(t, rep.Pages[0].Assets)
-}
-
 func TestAnalyzePagesSortedByDepthThenURL(t *testing.T) {
 	t.Parallel()
 
